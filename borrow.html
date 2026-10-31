@@ -792,7 +792,7 @@
             flex-direction: column;
             gap: 6px;
             margin-top: 8px;
-            max-height: 200px;
+            max-height: 320px;
             overflow-y: auto;
         }
 
@@ -1244,7 +1244,7 @@
            ============================================================ */
         .full-list-container {
             margin-top: 8px;
-            max-height: 150px;
+            max-height: 320px;
             overflow-y: auto;
             border-top: 1px solid var(--gray-200);
             padding-top: 8px;
@@ -1823,6 +1823,15 @@
                             <i class="fas fa-user-plus"></i> Add Faculty
                         </button>
                     </div>
+
+                    <div class="full-list-container" id="facultyFullList">
+                        <div class="list-label">Faculty Who Have Borrowed Before</div>
+                        <div id="facultyFullListItems">
+                            <div style="text-align:center;padding:8px;color:var(--gray-400);font-size:12px;">
+                                <i class="fas fa-spinner fa-spin"></i> Loading...
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -2138,6 +2147,13 @@ async function checkAuth() {
         const { data, error } = await _supabase.auth.getUser();
         
         if (error || !data.user) {
+            // A weak connection is not a logout: only a real authentication error means the login is invalid
+            const errText = String((error && error.message) || '').toLowerCase();
+            const networkProblem = !!error && (error.name === 'AuthRetryableFetchError' || error.status === 0 || error.status >= 500 || errText.includes('fetch') || errText.includes('network'));
+            if (networkProblem) {
+                console.warn('Could not reach the server, keeping the saved login for now.');
+                return true;
+            }
             console.log('🔒 Invalid session, redirecting to login');
             localStorage.removeItem('ismart_session');
             window.location.href = 'index.html';
@@ -2161,6 +2177,7 @@ async function checkAuth() {
             document.getElementById('borrowerFaculty').classList.toggle('active', type === 'faculty');
             document.getElementById('studentSearchSection').style.display = type === 'student' ? 'block' : 'none';
             document.getElementById('facultySearchSection').style.display = type === 'faculty' ? 'block' : 'none';
+            if (type === 'faculty') loadFullFacultyList();
 
             if (type === 'faculty') {
                 document.getElementById('studentBadge').className = 'badge badge-pending';
@@ -2301,6 +2318,77 @@ function renderFullStudentList() {
             <span class="item-status available">Select</span>
         </div>
     `).join('');
+}
+
+let allFaculty = [];
+
+// Faculty who have borrowed before. There is no faculty table, so past borrowing records are the source.
+async function loadFullFacultyList() {
+    const box = document.getElementById('facultyFullListItems');
+    try {
+        const { data, error } = await _supabase
+            .from('borrowing_transactions')
+            .select('faculty_name, faculty_email, borrow_date')
+            .not('faculty_name', 'is', null)
+            .order('borrow_date', { ascending: false })
+            .limit(1000);
+        if (error) throw error;
+
+        // One entry per person (same name in any capitalization). Newest record first, so the latest email wins.
+        const people = {};
+        (data || []).forEach(r => {
+            const name = String(r.faculty_name || '').trim();
+            if (!name) return;
+            const key = name.toLowerCase();
+            if (!people[key]) {
+                people[key] = { name: name, email: r.faculty_email || '', count: 0 };
+            } else if (!people[key].email && r.faculty_email) {
+                people[key].email = r.faculty_email;
+            }
+            people[key].count += 1;
+        });
+
+        allFaculty = Object.values(people).sort((a, b) => a.name.localeCompare(b.name));
+        renderFullFacultyList();
+    } catch (error) {
+        console.error('Error loading faculty:', error);
+        box.innerHTML = `
+            <div style="text-align:center;padding:8px;color:var(--gray-400);font-size:12px;">
+                <i class="fas fa-exclamation-circle"></i> Error loading faculty
+            </div>
+        `;
+    }
+}
+
+function renderFullFacultyList() {
+    const box = document.getElementById('facultyFullListItems');
+
+    if (allFaculty.length === 0) {
+        box.innerHTML = `
+            <div style="text-align:center;padding:8px;color:var(--gray-400);font-size:12px;">
+                No faculty have borrowed yet. Add one above.
+            </div>
+        `;
+        return;
+    }
+
+    box.innerHTML = allFaculty.map((f, i) => `
+        <div class="full-list-item" onclick="pickFaculty(${i})">
+            <div>
+                <div class="item-name">${esc(f.name)}</div>
+                <div class="item-details">${esc(f.email ? f.email + ' · ' : '')}${esc(f.count)} borrowing${f.count === 1 ? '' : 's'}</div>
+            </div>
+            <span class="item-status available">Select</span>
+        </div>
+    `).join('');
+}
+
+function pickFaculty(index) {
+    const f = allFaculty[index];
+    if (!f) return;
+    document.getElementById('facultyName').value = f.name;
+    document.getElementById('facultyEmail').value = f.email;
+    addFaculty();
 }
 
 async function loadFullAssetList() {
@@ -3502,6 +3590,7 @@ container.innerHTML = assets.map(a => {
             setInterval(updateDateTime, 1000);
 
             await loadFullStudentList();
+            await loadFullFacultyList();
             await loadFullAssetList();
 
             // Opened from a scanned asset label (dashboard "Borrow" button): add that asset to the list
