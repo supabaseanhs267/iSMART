@@ -890,6 +890,14 @@
         .overdue-items { font-size: 11px; color: var(--gray-600, #4B5563); margin-top: 3px; line-height: 1.4; }
         .stat-item.clickable { cursor: pointer; }
         .stat-item.active { outline: 2px solid var(--danger, #EF4444); border-radius: 10px; }
+    
+        /* Students | Faculty switch */
+        .view-toggle { display: flex; gap: 4px; margin-bottom: 12px; background: var(--gray-100); padding: 4px; border-radius: var(--radius-sm); }
+        .view-toggle button {
+            flex: 1; padding: 8px; border: none; border-radius: 8px; background: transparent; color: var(--gray-500);
+            font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer;
+        }
+        .view-toggle button.active { background: #fff; color: var(--primary); box-shadow: var(--shadow); }
     </style>
 </head>
 <body>
@@ -935,18 +943,23 @@
         </header>
 
         <!-- ===== STATS BAR ===== -->
+        <div class="view-toggle">
+            <button type="button" class="active" id="viewStudentsBtn" onclick="setViewMode('students')"><i class="fas fa-user-graduate"></i> Students</button>
+            <button type="button" id="viewFacultyBtn" onclick="setViewMode('faculty')"><i class="fas fa-chalkboard-teacher"></i> Faculty</button>
+        </div>
+
         <div class="stats-bar" id="statsBar">
             <div class="stat-item">
                 <div class="number" id="totalCount">0</div>
-                <div class="label">Total</div>
+                <div class="label" id="lblTotal">Total</div>
             </div>
             <div class="stat-item">
                 <div class="number" id="activeCount">0</div>
-                <div class="label">Active</div>
+                <div class="label" id="lblActive">Active</div>
             </div>
             <div class="stat-item">
                 <div class="number" id="borrowCount">0</div>
-                <div class="label">Borrowed</div>
+                <div class="label" id="lblBorrowed">Borrowed</div>
             </div>
             <div class="stat-item clickable" id="overdueTile" onclick="toggleOverdueFilter()" title="Show only students with overdue items">
                 <div class="number" id="overdueCount">0</div>
@@ -957,14 +970,8 @@
         <!-- ===== SEARCH SECTION ===== -->
         <div class="search-section">
             <div class="section-title">
-                <i class="fas fa-user-graduate"></i> Students
+                <i class="fas fa-user-graduate" id="sectionIcon"></i> <span id="sectionTitleText">Students</span>
                 <span style="font-size:11px;color:var(--gray-400);font-weight:400;margin-left:auto;" id="studentCount">0 enrolled</span>
-            </div>
-            <div class="search-hint">
-                <span>📋 LRN</span>
-                <span>👤 Name</span>
-                <span>📚 Grade</span>
-                <span>📁 Section</span>
             </div>
             <div class="search-input-group">
                 <input type="text" id="studentSearch" placeholder="Search by LRN, Name, Grade, Section..." />
@@ -981,7 +988,7 @@
     </div>
 
     <!-- ===== FAB ===== -->
-    <button class="fab" onclick="openAddModal()">
+    <button class="fab" id="fabAdd" onclick="openAddModal()">
         <i class="fas fa-plus"></i>
     </button>
 
@@ -1045,7 +1052,7 @@
             <i class="fas fa-undo-alt"></i><span>Return</span>
         </button>
         <button class="nav-item active">
-            <i class="fas fa-users"></i><span>Students</span>
+            <i class="fas fa-users"></i><span>Borrowers</span>
         </button>
         <button class="nav-item" onclick="window.location.href='activity.html'">
             <i class="fas fa-history"></i><span>Activity</span>
@@ -1157,6 +1164,13 @@
         const { data, error } = await _supabase.auth.getUser();
 
         if (error || !data.user) {
+            // A weak connection is not a logout: only a real authentication error means the login is invalid
+            const errText = String((error && error.message) || '').toLowerCase();
+            const networkProblem = !!error && (error.name === 'AuthRetryableFetchError' || error.status === 0 || error.status >= 500 || errText.includes('fetch') || errText.includes('network'));
+            if (networkProblem) {
+                console.warn('Could not reach the server, keeping the saved login for now.');
+                return true;
+            }
             console.log('🔒 Invalid session, redirecting to login');
             localStorage.removeItem('ismart_session');
             window.location.href = 'index.html';
@@ -1248,7 +1262,7 @@
         function toggleOverdueFilter() {
             overdueOnly = !overdueOnly;
             document.getElementById('overdueTile').classList.toggle('active', overdueOnly);
-            renderStudents();
+            renderAll();
         }
 
         async function fetchStudents() {
@@ -1333,16 +1347,155 @@
             }).join('');
         }
 
+        // ============================================================
+        // FACULTY VIEW: faculty who have borrowed before or have items out.
+        // There is no faculty table, so this is built from the borrowing records.
+        // ============================================================
+        let viewMode = 'students';
+        let facultyList = [];
+
+        async function fetchBorrowingPages(cols) {
+            const size = 1000;
+            let rows = [];
+            for (let from = 0; from < 10000; from += size) {
+                const { data, error } = await _supabase
+                    .from('borrowing_transactions')
+                    .select(cols)
+                    .not('faculty_name', 'is', null)
+                    .order('borrow_date', { ascending: false })
+                    .range(from, from + size - 1);
+                if (error) return { error };
+                rows = rows.concat(data || []);
+                if (!data || data.length < size) break;
+            }
+            return { data: rows };
+        }
+
+        async function fetchFacultyHistory() {
+            try {
+                const base = 'faculty_name, status, quantity, expected_return_date, borrow_date, assets:asset_id(name)';
+                let res = await fetchBorrowingPages('faculty_email, ' + base);
+                if (res.error && /faculty_email/i.test(res.error.message || '')) {
+                    res = await fetchBorrowingPages(base);          // this database has no email column
+                }
+                if (res.error) throw res.error;
+
+                const today = localDate(new Date());
+                const people = {};
+                res.data.forEach(r => {                             // newest first: the newest spelling and email win
+                    const name = String(r.faculty_name || '').trim();
+                    if (!name) return;
+                    const key = name.toLowerCase();
+                    const p = people[key] || (people[key] = { name: name, email: '', total: 0, out: 0, overdue: [] });
+                    if (!p.email && r.faculty_email) p.email = r.faculty_email;
+                    p.total += 1;
+                    if (r.status !== 'Returned') {
+                        p.out += 1;
+                        const due = r.expected_return_date ? String(r.expected_return_date).slice(0, 10) : null;
+                        if (due && due < today) {
+                            p.overdue.push({ name: (r.assets && r.assets.name) || 'Asset', qty: r.quantity || 1, days: daysBetween(due, today) });
+                        }
+                    }
+                });
+                Object.values(people).forEach(p => p.overdue.sort((a, b) => b.days - a.days));
+                facultyList = Object.values(people).sort((a, b) => a.name.localeCompare(b.name));
+            } catch (error) {
+                console.error('Error loading faculty:', error);
+                showToast('Could not load faculty', 'error');
+            }
+        }
+
+        function renderFacultyStats() {
+            const total = facultyList.length;
+            document.getElementById('totalCount').textContent = total;
+            document.getElementById('activeCount').textContent = facultyList.filter(f => f.out > 0).length;
+            document.getElementById('borrowCount').textContent = facultyList.reduce((n, f) => n + f.out, 0);
+            document.getElementById('overdueCount').textContent = facultyList.filter(f => f.overdue.length > 0).length;
+            document.getElementById('studentCount').textContent = total + ' faculty';
+        }
+
+        function renderFaculty() {
+            const container = document.getElementById('studentList');
+            const term = document.getElementById('studentSearch').value.toLowerCase().trim();
+            const filtered = facultyList.filter(f =>
+                (f.name + ' ' + f.email).toLowerCase().includes(term) && (!overdueOnly || f.overdue.length > 0));
+
+            if (filtered.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <i class="fas fa-user-slash"></i>
+                        <h3>No Faculty Found</h3>
+                        <p>${esc(term ? 'Try adjusting your search.' : overdueOnly ? 'Nobody has overdue items right now.' : 'Faculty appear here after they borrow something.')}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = filtered.map(f => {
+                const initials = f.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+                const overdueHtml = f.overdue.length ? `
+                    <div class="overdue-flag">${f.overdue.length} overdue · return needed</div>
+                    <div class="overdue-items">${f.overdue.slice(0, 3).map(o => '<div>' + esc(o.name) + (o.qty > 1 ? ' ×' + esc(o.qty) : '') + ' · ' + o.days + ' day' + (o.days === 1 ? '' : 's') + ' overdue</div>').join('')}${f.overdue.length > 3 ? '<div>+' + (f.overdue.length - 3) + ' more</div>' : ''}</div>` : '';
+                return `
+                    <div class="student-card">
+                        <div class="avatar">${esc(initials)}</div>
+                        <div class="info">
+                            <div class="name">${esc(f.name)}</div>
+                            <div class="details">${esc(f.email || 'No email on record')}</div>
+                            <div class="lrn">${esc(f.total)} borrowing${f.total === 1 ? '' : 's'} in total · ${f.out ? esc(f.out) + ' out now' : 'nothing out'}</div>${overdueHtml}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function setViewMode(mode) {
+            if (viewMode === mode) return;
+            viewMode = mode;
+            overdueOnly = false;
+            document.getElementById('overdueTile').classList.remove('active');
+            document.getElementById('studentSearch').value = '';
+
+            const faculty = mode === 'faculty';
+            document.getElementById('viewStudentsBtn').classList.toggle('active', !faculty);
+            document.getElementById('viewFacultyBtn').classList.toggle('active', faculty);
+            document.getElementById('sectionTitleText').textContent = faculty ? 'Faculty' : 'Students';
+            document.getElementById('sectionIcon').className = faculty ? 'fas fa-chalkboard-teacher' : 'fas fa-user-graduate';
+            document.getElementById('searchHint').style.display = faculty ? 'none' : '';
+            document.getElementById('studentSearch').placeholder = faculty ? 'Search by name or email...' : 'Search by LRN, Name, Grade, Section...';
+            document.getElementById('fabAdd').style.display = faculty ? 'none' : '';
+            document.getElementById('lblTotal').textContent = faculty ? 'Faculty' : 'Total';
+            document.getElementById('lblActive').textContent = faculty ? 'Out Now' : 'Active';
+            document.getElementById('lblBorrowed').textContent = faculty ? 'Items Out' : 'Borrowed';
+            document.getElementById('overdueTile').title = faculty ? 'Show only faculty with overdue items' : 'Show only students with overdue items';
+
+            if (faculty) {
+                document.getElementById('studentList').innerHTML = `
+                    <div class="empty-state">
+                        <i class="fas fa-spinner fa-spin"></i>
+                        <h3>Loading...</h3>
+                    </div>
+                `;
+                await fetchFacultyHistory();
+            }
+            renderAll();
+        }
+
         function renderAll() {
-            renderStats();
-            renderStudents();
+            if (viewMode === 'faculty') {
+                renderFacultyStats();
+                renderFaculty();
+            } else {
+                renderStats();
+                renderStudents();
+            }
         }
 
         // ============================================================
         // SEARCH
         // ============================================================
         function searchStudents() {
-            renderStudents();
+            renderAll();
         }
 
         // ============================================================
@@ -1520,7 +1673,10 @@
         }
 
         document.addEventListener('visibilitychange', async () => {
-            if (!document.hidden && students.length) { await fetchBorrowingStatus(); renderAll(); }
+            if (!document.hidden && students.length) {
+                if (viewMode === 'faculty') await fetchFacultyHistory(); else await fetchBorrowingStatus();
+                renderAll();
+            }
         });
 
         document.addEventListener('DOMContentLoaded', init);
