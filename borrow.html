@@ -2326,12 +2326,17 @@ let allFaculty = [];
 async function loadFullFacultyList() {
     const box = document.getElementById('facultyFullListItems');
     try {
-        const { data, error } = await _supabase
+        const build = cols => _supabase
             .from('borrowing_transactions')
-            .select('faculty_name, faculty_email, borrow_date')
+            .select(cols)
             .not('faculty_name', 'is', null)
             .order('borrow_date', { ascending: false })
             .limit(1000);
+
+        let { data, error } = await build('faculty_name, faculty_email, borrow_date');
+        if (error && /faculty_email/i.test(error.message || '')) {
+            ({ data, error } = await build('faculty_name, borrow_date'));   // this database has no email column
+        }
         if (error) throw error;
 
         // One entry per person (same name in any capitalization). Newest record first, so the latest email wins.
