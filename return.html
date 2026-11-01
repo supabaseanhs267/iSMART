@@ -767,7 +767,7 @@
             flex-direction: column;
             gap: 6px;
             margin-top: 8px;
-            max-height: 200px;
+            max-height: 320px;
             overflow-y: auto;
         }
 
@@ -812,7 +812,7 @@
            ============================================================ */
         .full-list-container {
             margin-top: 8px;
-            max-height: 150px;
+            max-height: 320px;
             overflow-y: auto;
             border-top: 1px solid var(--gray-200);
             padding-top: 8px;
@@ -2033,6 +2033,13 @@
             try {
         const { data, error } = await _supabase.auth.getUser();
         if (error || !data.user) {
+            // A weak connection is not a logout: only a real authentication error means the login is invalid
+            const errText = String((error && error.message) || '').toLowerCase();
+            const networkProblem = !!error && (error.name === 'AuthRetryableFetchError' || error.status === 0 || error.status >= 500 || errText.includes('fetch') || errText.includes('network'));
+            if (networkProblem) {
+                console.warn('Could not reach the server, keeping the saved login for now.');
+                return true;
+            }
             localStorage.removeItem('ismart_session');
             window.location.href = 'index.html';
             return false;
@@ -2126,28 +2133,43 @@
         // ============================================================
         // LOAD FULL FACULTY LIST (Only those with active borrowings)
         // ============================================================
+        // People with items still out: one row per name, with how many borrowings are out and how many are overdue
+        async function fetchActiveFacultyRows(nameFilter) {
+            const build = cols => {
+                let q = _supabase
+                    .from('borrowing_transactions')
+                    .select(cols)
+                    .eq('status', 'Borrowed')
+                    .not('faculty_name', 'is', null);
+                if (nameFilter) q = q.ilike('faculty_name', `%${nameFilter}%`);
+                return q.order('faculty_name');
+            };
+
+            let res = await build('faculty_name, faculty_email, expected_return_date');
+            if (res.error && /faculty_email/i.test(res.error.message || '')) {
+                res = await build('faculty_name, expected_return_date');   // this database has no email column
+            }
+            if (res.error) throw res.error;
+            return res.data || [];
+        }
+
+        function groupFaculty(rows) {
+            const today = retLocalDate(new Date());
+            const people = {};
+            (rows || []).forEach(r => {
+                if (!r.faculty_name) return;
+                const p = people[r.faculty_name] || (people[r.faculty_name] = { name: r.faculty_name, email: 'N/A', count: 0, overdue: 0 });
+                if (r.faculty_email && p.email === 'N/A') p.email = r.faculty_email;
+                p.count += 1;
+                const due = r.expected_return_date ? String(r.expected_return_date).slice(0, 10) : null;
+                if (due && due < today) p.overdue += 1;
+            });
+            return Object.values(people);
+        }
+
         async function loadReturnFullFacultyList() {
             try {
-                const { data, error } = await _supabase
-                    .from('borrowing_transactions')
-                    .select('faculty_name, faculty_email')
-                    .eq('status', 'Borrowed')
-                    .not('faculty_name', 'is', null)
-                    .order('faculty_name');
-
-                if (error) throw error;
-
-                const uniqueFaculty = {};
-                data.forEach(item => {
-                    if (item.faculty_name && !uniqueFaculty[item.faculty_name]) {
-                        uniqueFaculty[item.faculty_name] = {
-                            name: item.faculty_name,
-                            email: item.faculty_email || 'N/A'
-                        };
-                    }
-                });
-
-                allFaculty = Object.values(uniqueFaculty);
+                allFaculty = groupFaculty(await fetchActiveFacultyRows());
                 renderReturnFullFacultyList();
             } catch (error) {
                 console.error('Error loading faculty:', error);
@@ -2172,7 +2194,7 @@
                 <div class="full-list-item" onclick="selectReturnFaculty(${esc(JSON.stringify(f.name))}, ${esc(JSON.stringify(f.email))})">
                     <div>
                         <div class="item-name">${esc(f.name)}</div>
-                        <div class="item-details">${esc(f.email !== 'N/A' ? f.email : '')}</div>
+                        <div class="item-details">${esc(f.email !== 'N/A' ? f.email + ' · ' : '')}${esc(f.count)} borrowing${f.count === 1 ? '' : 's'} out${f.overdue ? '<span style="color:var(--danger);font-weight:600;"> · ' + esc(f.overdue) + ' overdue</span>' : ''}</div>
                     </div>
                     <span class="item-status">Select</span>
                 </div>
@@ -2709,27 +2731,7 @@
             }
 
             try {
-                const { data, error } = await _supabase
-                    .from('borrowing_transactions')
-                    .select('faculty_name, faculty_email')
-                    .eq('status', 'Borrowed')
-                    .not('faculty_name', 'is', null)
-                    .ilike('faculty_name', `%${query}%`)
-                    .order('faculty_name');
-
-                if (error) throw error;
-
-                const uniqueFaculty = {};
-                data.forEach(item => {
-                    if (item.faculty_name && !uniqueFaculty[item.faculty_name]) {
-                        uniqueFaculty[item.faculty_name] = {
-                            name: item.faculty_name,
-                            email: item.faculty_email || 'N/A'
-                        };
-                    }
-                });
-
-                faculty = Object.values(uniqueFaculty);
+                faculty = groupFaculty(await fetchActiveFacultyRows(query));
                 const container = document.getElementById('returnFacultyResults');
                 if (faculty.length === 0) {
                     container.innerHTML = `<div class="empty-state"><i class="fas fa-user-slash"></i><p>No faculty found</p></div>`;
