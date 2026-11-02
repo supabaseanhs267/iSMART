@@ -323,22 +323,7 @@
             font-size: 14px;
         }
 
-        .search-hint {
-            font-size: 10px;
-            color: var(--gray-400);
-            margin-bottom: 6px;
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
 
-        .search-hint span {
-            background: var(--gray-100);
-            padding: 1px 6px;
-            border-radius: 4px;
-            font-size: 9px;
-            color: var(--gray-600);
-        }
 
         .search-input-group {
             display: flex;
@@ -973,12 +958,6 @@
                 <i class="fas fa-user-graduate" id="sectionIcon"></i> <span id="sectionTitleText">Students</span>
                 <span style="font-size:11px;color:var(--gray-400);font-weight:400;margin-left:auto;" id="studentCount">0 enrolled</span>
             </div>
-            <div class="search-hint" id="searchHint">
-                <span>📋 LRN</span>
-                <span>👤 Name</span>
-                <span>📚 Grade</span>
-                <span>📁 Section</span>
-            </div>
             <div class="search-input-group">
                 <input type="text" id="studentSearch" placeholder="Search by LRN, Name, Grade, Section..." />
                 <button onclick="searchStudents()"><i class="fas fa-search"></i></button>
@@ -1468,7 +1447,6 @@
             document.getElementById('viewFacultyBtn').classList.toggle('active', faculty);
             document.getElementById('sectionTitleText').textContent = faculty ? 'Faculty' : 'Students';
             document.getElementById('sectionIcon').className = faculty ? 'fas fa-chalkboard-teacher' : 'fas fa-user-graduate';
-            document.getElementById('searchHint').style.display = faculty ? 'none' : '';
             document.getElementById('studentSearch').placeholder = faculty ? 'Search by name or email...' : 'Search by LRN, Name, Grade, Section...';
             document.getElementById('fabAdd').style.display = faculty ? 'none' : '';
             document.getElementById('lblTotal').textContent = faculty ? 'Faculty' : 'Total';
