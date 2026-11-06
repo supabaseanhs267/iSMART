@@ -1879,7 +1879,7 @@
             <i class="fas fa-undo-alt"></i><span>Return</span>
         </button>
         <button class="nav-item" onclick="window.location.href='students.html'">
-            <i class="fas fa-users"></i><span>Borrowers</span>
+            <i class="fas fa-users"></i><span>Students</span>
         </button>
         <button class="nav-item" onclick="window.location.href='activity.html'">
             <i class="fas fa-history"></i><span>Activity</span>
@@ -2140,7 +2140,8 @@
                     .from('borrowing_transactions')
                     .select(cols)
                     .eq('status', 'Borrowed')
-                    .not('faculty_name', 'is', null);
+                    .not('faculty_name', 'is', null)
+                    .is('student_id', null);
                 if (nameFilter) q = q.ilike('faculty_name', `%${nameFilter}%`);
                 return q.order('faculty_name');
             };
@@ -2876,6 +2877,24 @@
             closeReturnIDScanner();
         }
 
+        // Same learner (same LRN) but a new grade or section, e.g. after being promoted: bring the saved record up to date.
+        // Blank values never overwrite what is saved, and the name is never changed.
+        async function refreshStudentDetails(saved, grade, section) {
+            const changes = {};
+            if (grade && grade !== 'Not specified' && grade !== saved.grade_level) changes.grade_level = grade;
+            if (section && section !== (saved.section || '')) changes.section = section;
+            if (Object.keys(changes).length === 0) return saved;
+
+            const { data, error } = await _supabase
+                .from('students')
+                .update(changes)
+                .eq('id', saved.id)
+                .select()
+                .single();
+            if (error) throw error;
+            return data;
+        }
+
         function hideReturnManualEntry() {
             document.getElementById('returnManualEntry').classList.remove('show');
         }
@@ -2896,19 +2915,24 @@
             }
 
             try {
-                const { data: existing } = await _supabase.from('students').select('*').eq('lrn', lrn).limit(1);
+                const { data: existing, error: lookupError } = await _supabase.from('students').select('*').eq('lrn', lrn).limit(1);
+                if (lookupError) throw lookupError;
+
                 if (existing && existing.length > 0) {
-                    selectReturnStudentFromData(existing[0]);
-                    showToast(`Student found: ${existing[0].full_name}`, 'success');
+                    // Same learner (same LRN): if the grade or section was changed in the form, keep the saved record up to date
+                    const saved = existing[0];
+                    const before = saved.grade_level + '|' + (saved.section || '');
+                    const student = await refreshStudentDetails(saved, grade, section);
+                    const changed = (student.grade_level + '|' + (student.section || '')) !== before;
+                    selectReturnStudentFromData(student);
+                    showToast(changed
+                        ? `✅ ${student.full_name} updated to ${student.grade_level} · ${student.section || 'No section'}`
+                        : `Student found: ${student.full_name}`, 'success');
                 } else {
-                    const { data: created, error } = await _supabase
-                        .from('students')
-                        .insert([{ lrn, full_name: name, grade_level: grade, section }])
-                        .select()
-                        .single();
-                    if (error) throw error;
-                    selectReturnStudentFromData(created);
-                    showToast(`✅ New student added: ${created.full_name}`, 'success');
+                    // A return needs a student who already borrowed. An unknown LRN is usually a misread or typo,
+                    // so do not create a new student here.
+                    showToast('❌ No student found with this LRN. Check the number on the ID.', 'error');
+                    return;
                 }
                 hideReturnManualEntry();
                 document.getElementById('returnOcrResult').classList.remove('show');
@@ -2924,23 +2948,26 @@
             }
 
             try {
-                const { data: existing } = await _supabase.from('students').select('*').eq('lrn', ocrData.lrn).limit(1);
+                const { data: existing, error: lookupError } = await _supabase.from('students').select('*').eq('lrn', ocrData.lrn).limit(1);
+                if (lookupError) throw lookupError;
+
                 if (existing && existing.length > 0) {
-                    selectReturnStudentFromData(existing[0]);
+                    let student = existing[0];
+                    const ocrGrade = ocrData.grade, ocrSection = ocrData.section;
+                    const gradeDiffers = ocrGrade && ocrGrade !== student.grade_level;
+                    const sectionDiffers = ocrSection && ocrSection !== (student.section || '');
+                    if ((gradeDiffers || sectionDiffers) && confirm(
+                        student.full_name + ' is saved as ' + student.grade_level + ' · ' + (student.section || 'No section') + '.\n\n' +
+                        'This ID says ' + (ocrGrade || student.grade_level) + ' · ' + (ocrSection || student.section || 'No section') + '.\n\n' +
+                        'Update the saved record to match?')) {
+                        student = await refreshStudentDetails(student, ocrGrade, ocrSection);
+                    }
+                    selectReturnStudentFromData(student);
                 } else {
-                    const { data: created, error } = await _supabase
-                        .from('students')
-                        .insert([{
-                            lrn: ocrData.lrn,
-                            full_name: ocrData.name || 'Unknown',
-                            grade_level: ocrData.grade || 'Not specified',
-                            section: ocrData.section || ''
-                        }])
-                        .select()
-                        .single();
-                    if (error) throw error;
-                    selectReturnStudentFromData(created);
-                    showToast(`✅ New student added: ${created.full_name}`, 'success');
+                    // A return needs a student who already borrowed. An unknown LRN is usually a misread digit,
+                    // so do not create a new student here: let the person retake the photo or fix the number.
+                    showToast('❌ No student found with this LRN. Retake the photo or check the number.', 'error');
+                    return;
                 }
                 closeReturnIDScanner();
                 document.getElementById('returnOcrResult').classList.remove('show');
